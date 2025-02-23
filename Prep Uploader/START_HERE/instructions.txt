@@ -1,9 +1,0 @@
-INSTRUCTIONS
-
-1) Start by running the installation within this folder:
-	mac_install for Mac
-	windows_install for Windows
-
-2) Once finished, go back to the main folder and run:
-	start_mac for Mac
-	start_windows for Windows

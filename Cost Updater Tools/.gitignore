@@ -1,0 +1,4 @@
+.env
+venv/
+lambda_packages/
+.DS_Store
