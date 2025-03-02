@@ -1,0 +1,7 @@
+{
+    "google_sheet_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0V_bwzTiaMDwECn1bEDsyh9m3Wsy7OofffFuyr9zRLIR_E2g3vtwTTHiW9DC0ZUfavnwvQwH0hrQe/pub?gid=0&single=true&output=csv",
+    "column_mapping": {
+        "ASIN": "ASIN",
+        "COGS": "COST"
+    }
+}
