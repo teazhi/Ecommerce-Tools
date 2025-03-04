@@ -19,6 +19,7 @@ load_dotenv()
 # Google Sheet URLs for Tevin and David
 TEVIN_SHEET = os.getenv('TEVIN_SHEET')
 DAVID_SHEET = os.getenv('DAVID_SHEET')  # New environment variable for David's sheet
+OSCAR_SHEET = os.getenv('OSCAR_SHEET')
 
 CONFIG_S3_BUCKET = os.getenv("CONFIG_S3_BUCKET")
 LISTING_LOADER_KEY = "listingLoaderTemplate.xlsm"
@@ -28,12 +29,15 @@ TEVIN_SB_FILE_KEY = "tevin_sb.xlsx"
 TEVIN_SB_UPDATED_FILE = "tevin_sb.xlsx"
 DAVID_SB_FILE_KEY = "david_sb.xlsx"
 DAVID_SB_UPDATED_FILE = "david_sb.xlsx"
+OSCAR_SB_FILE_KEY = "oscar_sb.xlsx"
+OSCAR_SB_UPDATED_FILE = "oscar_sb.xlsx"
 
 # Email credentials and recipient addresses for Tevin and David
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 TEVIN_EMAIL = os.getenv("TEVIN_EMAIL")
 DAVID_EMAIL = os.getenv("DAVID_EMAIL")
+OSCAR_EMAIL = os.getenv("OSCAR_EMAIL")
 
 if not TEVIN_SHEET:
     raise ValueError("TEVIN_SHEET environment variable is not set.")
@@ -341,6 +345,18 @@ def lambda_handler(event, context):
                 new_date_list.append(david_df["Date"].max())
         else:
             david_sb_df = None
+
+        if OSCAR_SHEET:
+            oscar_df, oscar_sb_df, potential_updates_oscar, new_products_oscar, actual_updates_oscar = process_sheet(
+                OSCAR_SHEET, OSCAR_SB_FILE_KEY, OSCAR_SB_UPDATED_FILE, ws, headers, col_indices, last_processed_date
+            )
+            potential_updates_all.extend(potential_updates_oscar)
+            new_products_all.extend(new_products_oscar)
+            actual_updates_all.extend(actual_updates_oscar)
+            if not oscar_df.empty:
+                new_date_list.append(oscar_df["Date"].max())
+        else:
+            oscar_sb_df = None
         
         # Save updated Listing Loader workbook into a BytesIO buffer
         listing_loader_output_buffer = io.BytesIO()
@@ -370,6 +386,16 @@ def lambda_handler(event, context):
                 (BytesIO(listing_loader_bytes), "listingLoaderUpdated.xlsm"),
                 (david_sb_buffer, DAVID_SB_UPDATED_FILE)
             ]
+
+        attachments_oscar = []
+        if oscar_sb_df is not None:
+            oscar_sb_buffer = io.BytesIO()
+            oscar_sb_df.to_excel(oscar_sb_buffer, index=False, engine='openpyxl')
+            oscar_sb_buffer.seek(0)
+            attachments_oscar = [
+                (BytesIO(listing_loader_bytes), "listingLoaderUpdated.xlsm"),
+                (oscar_sb_buffer, OSCAR_SB_UPDATED_FILE)
+            ]
         
         # Upload updated SB files to S3
         s3_client = boto3.client('s3')
@@ -380,6 +406,9 @@ def lambda_handler(event, context):
             if david_sb_df is not None:
                 s3_client.put_object(Bucket=CONFIG_S3_BUCKET, Key=DAVID_SB_FILE_KEY, Body=david_sb_buffer.getvalue())
                 print("Successfully uploaded updated David SB file to S3")
+            if oscar_sb_df is not None:
+                s3_client.put_object(Bucket=CONFIG_S3_BUCKET, Key=OSCAR_SB_FILE_KEY, Body=oscar_sb_buffer.getvalue())
+                print("Successfully uploaded updated Oscar SB file to S3")
         except Exception as e:
             print(f"Error uploading SB file to S3: {e}")
             raise
@@ -392,6 +421,10 @@ def lambda_handler(event, context):
         if attachments_david and DAVID_EMAIL:
             send_email(attachments_david, DAVID_EMAIL, potential_updates_all, new_products_all, actual_updates_all)
         
+        if attachments_oscar and OSCAR_EMAIL:
+            send_email(attachments_oscar, OSCAR_EMAIL, potential_updates_all, new_products_all, actual_updates_all)
+        
+
         # Update last processed date using the maximum date found in both sheets
         if new_date_list:
             new_last_processed_date = str(pd.to_datetime(max(new_date_list)).date())

@@ -48,6 +48,22 @@ def update_last_processed_date(new_date):
     except Exception as e:
         print(f"Error updating last processed date: {e}")
 
+def send_error_email(error_message):
+    """Sends an email notification if the script encounters an error."""
+    msg = EmailMessage()
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = TEVIN_EMAIL
+    msg['Subject'] = "Script Error Notification"
+    msg.set_content(f"An error occurred while running the script:\n\n{error_message}")
+    
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("Error email sent successfully.")
+    except Exception as e:
+        print(f"Failed to send error email: {e}")
 
 def send_email(attachment_data, attachment_filename, recipient_email):
     """Sends an email with the processed IF Prep Sheet attached."""
@@ -216,7 +232,6 @@ def lambda_handler(event, context):
         leads_df1 = fetch_google_sheet(TEVIN_SHEET)
         tevin_latest = start_conversion(leads_df1, TEVIN_EMAIL)
         if tevin_latest:
-            # Only append if we actually got a date (string)
             last_processed_dates.append(pd.to_datetime(tevin_latest))
 
         # Process David's sheet
@@ -242,5 +257,7 @@ def lambda_handler(event, context):
         return {"statusCode": 200, "body": "Process completed for all sheets."}
 
     except Exception as e:
-        print(f"Error in Lambda function: {e}")
-        return {"statusCode": 500, "body": f"Error: {str(e)}"}
+        error_message = f"Error in Lambda function: {str(e)}"
+        print(error_message)
+        send_error_email(error_message)
+        return {"statusCode": 500, "body": error_message}
