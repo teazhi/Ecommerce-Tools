@@ -22,7 +22,6 @@ LISTING_LOADER_KEY = "listingLoaderTemplate.xlsm"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
-# User configuration: only Tevin is included for now.
 users_config = [
     {
         "name": "Tevin",
@@ -37,6 +36,13 @@ users_config = [
         "sb_file_key": "oscar_sb.xlsx",
         "sb_updated_file": "oscar_sb.xlsx",
         "email": os.getenv("OSCAR_EMAIL")
+    },
+    {
+        "name": "David",
+        "sheet_url": os.getenv("DAVID_SHEET"),
+        "sb_file_key": "david_sb.xlsx",
+        "sb_updated_file": "david_sb.xlsx",
+        "email": os.getenv("DAVID_EMAIL")
     }
 ]
 
