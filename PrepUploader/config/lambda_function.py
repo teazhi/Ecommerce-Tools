@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import boto3
 from io import StringIO
 import csv
+from datetime import datetime, timezone
 
 # Load environment variables
 load_dotenv()
@@ -48,6 +49,7 @@ def update_last_processed_date(new_date):
     except Exception as e:
         print(f"Error updating last processed date: {e}")
 
+
 def send_error_email(error_message):
     """Sends an email notification if the script encounters an error."""
     msg = EmailMessage()
@@ -64,6 +66,7 @@ def send_error_email(error_message):
         print("Error email sent successfully.")
     except Exception as e:
         print(f"Failed to send error email: {e}")
+
 
 def send_email(attachment_data, attachment_filename, recipient_email):
     """Sends an email with the processed IF Prep Sheet attached."""
@@ -130,7 +133,7 @@ def start_conversion(leads_df, recipient_email):
         leads_df["Date"] = pd.to_datetime(leads_df["Date"], errors="coerce")
         
         # Find all dates after last_processed_date
-        mask = leads_df["Date"] > pd.to_datetime(last_processed_date)
+        mask = leads_df["Date"] >= pd.to_datetime(last_processed_date)
         filtered_dates = leads_df.loc[mask, "Date"]
 
         # If there is no new data, return None
@@ -226,33 +229,23 @@ def start_conversion(leads_df, recipient_email):
 def lambda_handler(event, context):
     """AWS Lambda Entry Point."""
     try:
-        last_processed_dates = []
-        
         # Process Tevin's sheet
         leads_df1 = fetch_google_sheet(TEVIN_SHEET)
         tevin_latest = start_conversion(leads_df1, TEVIN_EMAIL)
-        if tevin_latest:
-            last_processed_dates.append(pd.to_datetime(tevin_latest))
 
         # Process David's sheet
         leads_df2 = fetch_google_sheet(DAVID_SHEET)
         david_latest = start_conversion(leads_df2, DAVID_EMAIL)
-        if david_latest:
-            last_processed_dates.append(pd.to_datetime(david_latest))
 
         # Process Oscar's sheet
         leads_df3 = fetch_google_sheet(OSCAR_SHEET)
         oscar_latest = start_conversion(leads_df3, OSCAR_EMAIL)
-        if oscar_latest:
-            last_processed_dates.append(pd.to_datetime(oscar_latest))
 
-        # Update config only once with the latest date from all sheets
-        if last_processed_dates:
-            new_last_date = max(last_processed_dates).strftime('%Y-%m-%d')
-            update_last_processed_date(new_last_date)
-            print(f"Final last processed date updated to: {new_last_date}")
-        else:
-            print("No new dates processed from any sheet.")
+        # Instead of using the latest date from the sheets,
+        # update the config with the current date (UTC) as the processed date.
+        current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        update_last_processed_date(current_date)
+        print(f"Final last processed date updated to: {current_date}")
 
         return {"statusCode": 200, "body": "Process completed for all sheets."}
 

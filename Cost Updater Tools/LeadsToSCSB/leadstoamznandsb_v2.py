@@ -22,7 +22,7 @@ LISTING_LOADER_KEY = "listingLoaderTemplate.xlsm"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
-# User configuration: add new users by simply appending a dictionary to this list.
+# User configuration: only Tevin is included for now.
 users_config = [
     {
         "name": "Tevin",
@@ -32,20 +32,12 @@ users_config = [
         "email": os.getenv("TEVIN_EMAIL")
     },
     {
-        "name": "David",
-        "sheet_url": os.getenv("DAVID_SHEET"),
-        "sb_file_key": "david_sb.xlsx",
-        "sb_updated_file": "david_sb.xlsx",
-        "email": os.getenv("DAVID_EMAIL")
-    },
-    {
         "name": "Oscar",
         "sheet_url": os.getenv("OSCAR_SHEET"),
         "sb_file_key": "oscar_sb.xlsx",
         "sb_updated_file": "oscar_sb.xlsx",
         "email": os.getenv("OSCAR_EMAIL")
-    },
-    # Add more users here as needed.
+    }
 ]
 
 if not any(user["sheet_url"] for user in users_config):
@@ -167,7 +159,6 @@ def send_email(attachments, recipient_email, potential_updates, new_products, ac
     
     msg.add_alternative(html_content, subtype='html')
     
-    # Attach each file from the attachments list
     for attachment_data, attachment_filename in attachments:
         attachment_data.seek(0)
         try:
@@ -246,7 +237,8 @@ def process_sheet(sheet_url, sb_file_key, sb_updated_file, ws, headers, col_indi
         if not existing_entry.empty:
             old_cost = existing_entry.iloc[0]['Cost']
             sku = existing_entry.iloc[0]['SKU']
-            if pd.isna(old_cost) or old_cost == '':
+            # Treat empty, NaN, or 'nan' as missing
+            if pd.isna(old_cost) or old_cost == '' or str(old_cost).lower() == 'nan':
                 sb_df.loc[sb_df['ASIN'] == asin, 'Cost'] = new_cost
                 actual_updates.append({
                     'ASIN': asin,
@@ -292,6 +284,10 @@ def process_sheet(sheet_url, sb_file_key, sb_updated_file, ws, headers, col_indi
             new_row[col_indices['Offering Condition Type'] - 1] = 'New'
             new_row[col_indices['Fulfillment Channel Code (US)'] - 1] = 'AMAZON_NA'
             new_row[col_indices['Your Price USD (Sell on Amazon, US)'] - 1] = f"{float(row['Sale Price']) * 1.15:.2f}"
+            # Set column 55 ("Are batteries required?") to "No"
+            new_row[54] = "No"
+            # Set column 58 ("Dangerous Goods Regulations") to "Unknown"
+            new_row[57] = "Unknown"
             ws.append(new_row)
     
     return df, sb_df, potential_updates, new_products, actual_updates
@@ -303,7 +299,7 @@ def lambda_handler(event, context):
         new_date_list = []
         s3_client = boto3.client('s3')
         
-        # Process each user separately so each gets a unique Listing Loader
+        # Process each user separately so each gets a unique Listing Loader; here, only Tevin.
         for user in users_config:
             if not user["sheet_url"]:
                 continue
@@ -336,7 +332,7 @@ def lambda_handler(event, context):
             if not df.empty:
                 new_date_list.append(df["Date"].max())
             
-            # Save this user's updated Listing Loader workbook to a buffer
+            # Save the updated Listing Loader workbook to a buffer for this user
             listing_loader_output_buffer = io.BytesIO()
             wb.save(listing_loader_output_buffer)
             listing_loader_output_buffer.seek(0)

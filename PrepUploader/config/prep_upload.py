@@ -1,162 +1,256 @@
+import json
 import os
-import sys
 import pandas as pd
-from tkinter import filedialog, Tk
+import requests
+import smtplib
+import ssl
+from email.message import EmailMessage
+from dotenv import load_dotenv
+import boto3
+from io import StringIO
+import csv
+from datetime import datetime, timezone
 
-def get_file_path(prompt):
-    """
-    Prompts the user and opens a file dialog to select a file.
-    """
-    print(prompt, end="")
-    input()  # Wait for the user to press Enter
-    root = Tk()
-    root.withdraw()  # Hide the root Tkinter window
-    print("Select file dialog has opened. Please move this dialog if you do not see it.")
-    file_path = filedialog.askopenfilename()
-    root.destroy()
-    if not file_path:
-        print("No file selected. Exiting.")
-        sys.exit(1)
-    print(f"Selected file: {file_path}")
-    return file_path
+# Load environment variables
+load_dotenv()
 
-def convert_date_format(date_value, row_number):
-    """
-    Converts a date to MM/DD/YYYY format.
-    If the date format is invalid, prints an error and exits.
-    Utilizes pandas' to_datetime for robust date parsing.
-    """
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+CONFIG_S3_BUCKET = os.getenv("CONFIG_S3_BUCKET")
+TEVIN_SHEET = os.getenv("TEVIN_SHEET")
+DAVID_SHEET = os.getenv("DAVID_SHEET")
+OSCAR_SHEET = os.getenv("OSCAR_SHEET")
+TEVIN_EMAIL = os.getenv("TEVIN_EMAIL")
+DAVID_EMAIL = os.getenv("DAVID_EMAIL")
+OSCAR_EMAIL = os.getenv("OSCAR_EMAIL")
+
+
+def get_last_processed_date():
+    """Retrieve the last processed date from the config file in S3."""
+    s3_client = boto3.client('s3')
+    config_key = "config.json"
     try:
-        # Attempt to parse the date using pandas
-        parsed_date = pd.to_datetime(date_value, errors='raise')
-        return parsed_date.strftime("%m/%d/%Y")
-    except Exception:
-        print(f"Date format error in row {row_number}: {date_value}")
-        sys.exit(1)
+        response = s3_client.get_object(Bucket=CONFIG_S3_BUCKET, Key=config_key)
+        config_data = json.loads(response['Body'].read().decode('utf-8'))
+        return config_data.get("last_processed_date", "2000-01-01")
+    except Exception as e:
+        print(f"Error fetching last processed date: {e}")
+        return "2000-01-01"
 
-def start_conversion(leads_sheet_path, prep_sheet_path):
-    """
-    Converts the leads sheet to a format compatible with Instant Fulfillment's import feature.
-    """
-    print("Starting conversion...")
+
+def update_last_processed_date(new_date):
+    """Update the last processed date in the config file stored in S3."""
+    s3_client = boto3.client('s3')
+    config_key = "config.json"
+    new_config = json.dumps({"last_processed_date": new_date})
+    try:
+        s3_client.put_object(Bucket=CONFIG_S3_BUCKET, Key=config_key, Body=new_config)
+        print(f"Updated last processed date to: {new_date} in S3.")
+    except Exception as e:
+        print(f"Error updating last processed date: {e}")
+
+
+def send_error_email(error_message):
+    """Sends an email notification if the script encounters an error."""
+    msg = EmailMessage()
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = TEVIN_EMAIL
+    msg['Subject'] = "Script Error Notification"
+    msg.set_content(f"An error occurred while running the script:\n\n{error_message}")
     
     try:
-        # Load the leads Excel file
-        leads_df = pd.read_excel(leads_sheet_path)
-        # print("\nLeads DataFrame Preview:")
-        # print(leads_df.head())
-        
-        # Load the prep CSV
-        prep_df = pd.read_csv(prep_sheet_path)
-        
-        # Identify the first column name
-        first_col = leads_df.columns[0]
-        other_cols = leads_df.columns[1:]
-        
-        # Create a mask for rows where only the first column is filled
-        mask_first_col_filled = leads_df[first_col].notna() & leads_df[first_col].astype(str).str.strip().ne('')
-        mask_other_cols_empty = leads_df[other_cols].isnull().all(axis=1) | leads_df[other_cols].astype(str).apply(lambda x: x.str.strip()).eq('').all(axis=1)
-        marker_row_mask = mask_first_col_filled & mask_other_cols_empty
-        
-        # Find marker rows
-        marker_rows = leads_df[marker_row_mask]
-        total_rows = len(leads_df)
-        # print(f"Total rows in DataFrame: {total_rows}")
-        
-        if not marker_rows.empty:
-            # Get the first marker row index
-            first_marker_idx = marker_rows.index[0]
-            # print(f"\nMarker row found at DataFrame index: {first_marker_idx} (Excel row {first_marker_idx + 1})")
-            # Slice the DataFrame to include only rows after the marker row
-            data_to_process = leads_df.iloc[first_marker_idx + 1:]
-            print(f"Number of new buys to process: {len(data_to_process)}")
-            
-            # Debug: Print the rows to be processed
-            print("\nRows to Process:")
-            print(data_to_process)
-        else:
-            print("\nNo marker row found. Processing all rows.")
-            data_to_process = leads_df
-        
-        if data_to_process.empty:
-            print("No data to process after the marker row.")
-            sys.exit(0)
-        
-        # Initialize a list to collect processed data
-        processed_data = []
-        
-        # Iterate through each row after the marker
-        for idx, row in data_to_process.iterrows():
-            excel_row_number = idx + 2  # +1 for 1-based indexing and +1 for marker row
-            date_value = row['Date']
-            converted_date = convert_date_format(date_value, excel_row_number)
-            
-            # Extract other required fields with default values
-            item_name = row.get('Name', 'N/A')
-            asin = row.get('ASIN', 'N/A')
-            cogs = row.get('COGS', 0)
-            sale_price = row.get('Sale Price', 0)
-            fba_or_fbm = "FBA"
-            supplier_retailer = "temp"
-            size_color = "N/A"
-            
-            # Process 'Bundled?' column
-            bundled = "Yes" if pd.notna(row.get('Bundled?')) and str(row['Bundled?']).strip() != "" else "No"
-            
-            # Handle '# Units in Bundle'
-            if bundled == "Yes":
-                try:
-                    units_in_bundle = int(row['Bundled?'])
-                except (ValueError, TypeError):
-                    print(f"Invalid '# Units in Bundle' in row {excel_row_number}: {row['Bundled?']}")
-                    sys.exit(1)
-            else:
-                units_in_bundle = 0
-            
-            units_expected = row.get('Amount Purchased', 0)
-            
-            # Append the processed row to the list
-            processed_data.append({
-                'Order Date': converted_date,
-                'Item Name / Description': item_name,
-                'ASIN': asin,
-                # 'Order #': row['Order #'],  # Uncomment if needed
-                'COGS': cogs,
-                'Requested List Price': sale_price,
-                'FBA or FBM': fba_or_fbm,
-                'Supplier / Retailer': supplier_retailer,
-                'Size / Color': size_color,
-                'Bundled?': bundled,
-                '# Units in Bundle': units_in_bundle,
-                '# Units Expected': units_expected
-            })
-        
-        # Create the output DataFrame from the processed data
-        output_df = pd.DataFrame(processed_data, columns=prep_df.columns)
-        
-        # Ensure the output directory exists
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Save the processed data to CSV
-        output_file_path = os.path.join(output_dir, "Processed_Instant_Fulfillment_Template.csv")
-        output_df.to_csv(output_file_path, index=False)
-        
-        print(f"\nConversion completed successfully. File saved as: {output_file_path}")
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("Error email sent successfully.")
+    except Exception as e:
+        print(f"Failed to send error email: {e}")
 
-    except FileNotFoundError as fnf_error:
-        print(f"File not found error: {fnf_error}")
-        sys.exit(1)
+
+def send_email(attachment_data, attachment_filename, recipient_email):
+    """Sends an email with the processed IF Prep Sheet attached."""
+    msg = EmailMessage()
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = recipient_email
+    msg['Subject'] = "Processed Instant Fulfillment Sheet"
+    msg.set_content("Attached is the updated IF Prep Sheet.")
+
+    try:
+        # Attach file correctly with proper MIME type
+        msg.add_attachment(
+            attachment_data.encode("utf-8"),
+            maintype="text",
+            subtype="csv",
+            filename=attachment_filename
+        )
+    except Exception as e:
+        print(f"Failed to add attachment: {e}")
+        return
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("Email sent successfully.")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+
+def fetch_google_sheet(url):
+    """Fetches the Google Sheet CSV data and returns a pandas DataFrame."""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        csv_data = StringIO(response.text)
+        df = pd.read_csv(csv_data, dtype=str)
+        print("Google Sheet data fetched successfully.")
+        return df
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Google Sheet: {e}")
+        raise
+    except pd.errors.ParserError as e:
+        print(f"Error parsing CSV data: {e}")
+        raise
+
+
+def start_conversion(leads_df, recipient_email):
+    """
+    Converts the leads sheet to match the Instant Fulfillment template,
+    filtering by last processed date and sending the result via email.
+    
+    Returns:
+        str  -- a string containing the latest processed date (e.g. "2025-01-01") 
+                if new data was processed
+        None -- if no new data exists or if an error occurs
+    """
+    print("Starting conversion...")
+
+    try:
+        # Get last processed date
+        last_processed_date = get_last_processed_date()
+        leads_df["Date"] = pd.to_datetime(leads_df["Date"], errors="coerce")
+        
+        # Find all dates after last_processed_date
+        mask = leads_df["Date"] >= pd.to_datetime(last_processed_date)
+        filtered_dates = leads_df.loc[mask, "Date"]
+
+        # If there is no new data, return None
+        if filtered_dates.empty:
+            print("No new data to process.")
+            return None
+
+        # Find the earliest date after last_processed_date
+        earliest_date = filtered_dates.min()
+        
+        # Filter to include all rows from earliest_date onward
+        leads_df = leads_df[leads_df["Date"] >= earliest_date]
+
+        # Define the headers we want to use manually
+        REQUIRED_HEADERS = [
+            "Order Date", "Supplier / Retailer", "Item Name / Description",
+            "Size / Color", "Bundled?", "# Units in Bundle", "# Units Expected",
+            "ASIN", "COGS", "Requested List Price", "Seller Notes / Prep Request",
+            "Tracking #", "Custom MSKU", "Order #", "UPC #", "FBA or FBM"
+        ]
+
+        output_data = []
+
+        for _, row in leads_df.iterrows():
+            # Format the date to "YYYY-MM-DD"
+            date_value = row.get("Date", "")
+            if pd.isnull(date_value):
+                date_str = ""
+            else:
+                date_str = date_value.strftime("%Y-%m-%d")
+
+            # Remove $ symbols and handle non-numeric sale prices
+            sale_price_str = str(row.get("Sale Price", "0")).replace("$", "").replace(",", "").strip()
+            try:
+                sale_price = float(sale_price_str)
+                requested_price = round(sale_price * 1.15, 2)
+            except ValueError:
+                requested_price = ""  # If Sale Price is not a valid number, set to empty
+
+            # Ensure "Prep Notes" is empty if it is null
+            prep_notes = row.get("Prep Notes", "")
+            if pd.isna(prep_notes):
+                prep_notes = ""
+
+            mapped_row = {
+                "Order Date": date_str,  # Use formatted date here
+                "Supplier / Retailer": "N/A",
+                "Item Name / Description": str(row.get("Name", "")),
+                "Size / Color": str(row.get("Size/Color", "N/A")),
+                "Bundled?": "Yes" if pd.notna(row.get("Bundled?")) and str(row.get("Bundled?")).strip() != "" else "No",
+                "# Units in Bundle": str(row.get("Bundled?", "")) if pd.notna(row.get("Bundled?")) else "",
+                "# Units Expected": str(row.get("Amount Purchased", "")),
+                "ASIN": str(row.get("ASIN", "")),
+                "COGS": str(row.get("COGS", "")),
+                "Requested List Price": "Replen" if "REPLEN" in sale_price_str.upper() else str(requested_price),
+                "Seller Notes / Prep Request": prep_notes,
+                "Tracking #": "",
+                "Custom MSKU": "",
+                "Order #": str(row.get("Order #", "")),
+                "UPC #": "",
+                "FBA or FBM": "FBA"
+            }
+            output_data.append(mapped_row)
+
+        # Convert to DataFrame using our required headers
+        output_df = pd.DataFrame(output_data)
+        output_df = output_df.reindex(columns=REQUIRED_HEADERS, fill_value="")
+        output_df = output_df.astype(str)
+
+        # Write the DataFrame to a CSV in memory
+        csv_buffer = StringIO()
+        output_df.to_csv(
+            csv_buffer,
+            index=False,
+            header=True,
+            quoting=csv.QUOTE_ALL
+        )
+        
+        # Send email with the CSV attachment
+        send_email(csv_buffer.getvalue(), "IF_Prep_Sheet.csv", recipient_email)
+
+        # Return the latest date found in the processed data
+        latest_date = str(leads_df["Date"].max().date())
+        print("Conversion process complete.")
+        return latest_date
+
     except Exception as e:
         print(f"Error during conversion: {e}")
-        sys.exit(1)
+        # Return None to indicate failure or no date
+        return None
 
-if __name__ == "__main__":
+
+def lambda_handler(event, context):
+    """AWS Lambda Entry Point."""
     try:
-        print("Convert your leads sheet to a sheet that works with Instant Fulfillment's import feature.\n")
-        leads_path = get_file_path("Please upload leads file (PRESS ENTER):")
-        prep_path = "config/IF_PREP_SHEET.csv"
-        start_conversion(leads_path, prep_path)
+        # Process Tevin's sheet
+        leads_df1 = fetch_google_sheet(TEVIN_SHEET)
+        tevin_latest = start_conversion(leads_df1, TEVIN_EMAIL)
+
+        # Process David's sheet
+        leads_df2 = fetch_google_sheet(DAVID_SHEET)
+        david_latest = start_conversion(leads_df2, DAVID_EMAIL)
+
+        # Process Oscar's sheet
+        leads_df3 = fetch_google_sheet(OSCAR_SHEET)
+        oscar_latest = start_conversion(leads_df3, OSCAR_EMAIL)
+
+        # Instead of using the latest date from the sheets,
+        # update the config with the current date (UTC) as the processed date.
+        current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        update_last_processed_date(current_date)
+        print(f"Final last processed date updated to: {current_date}")
+
+        return {"statusCode": 200, "body": "Process completed for all sheets."}
+
     except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        error_message = f"Error in Lambda function: {str(e)}"
+        print(error_message)
+        send_error_email(error_message)
+        return {"statusCode": 500, "body": error_message}
