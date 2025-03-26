@@ -17,13 +17,9 @@ load_dotenv()
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 CONFIG_S3_BUCKET = os.getenv("CONFIG_S3_BUCKET")
-TEVIN_SHEET = os.getenv("TEVIN_SHEET")
-DAVID_SHEET = os.getenv("DAVID_SHEET")
-OSCAR_SHEET = os.getenv("OSCAR_SHEET")
-TEVIN_EMAIL = os.getenv("TEVIN_EMAIL")
-DAVID_EMAIL = os.getenv("DAVID_EMAIL")
-OSCAR_EMAIL = os.getenv("OSCAR_EMAIL")
 
+# Key for your new user config file in S3
+USERS_CONFIG_KEY = "users.json"
 
 def get_last_processed_date():
     """Retrieve the last processed date from the config file in S3."""
@@ -37,7 +33,6 @@ def get_last_processed_date():
         print(f"Error fetching last processed date: {e}")
         return "2000-01-01"
 
-
 def update_last_processed_date(new_date):
     """Update the last processed date in the config file stored in S3."""
     s3_client = boto3.client('s3')
@@ -47,14 +42,14 @@ def update_last_processed_date(new_date):
         s3_client.put_object(Bucket=CONFIG_S3_BUCKET, Key=config_key, Body=new_config)
         print(f"Updated last processed date to: {new_date} in S3.")
     except Exception as e:
-        print(f"Error updating last processed date: {e}")
-
+        print(f"Error updating last_processed_date: {e}")
 
 def send_error_email(error_message):
     """Sends an email notification if the script encounters an error."""
     msg = EmailMessage()
     msg['From'] = EMAIL_ADDRESS
-    msg['To'] = TEVIN_EMAIL
+    # Could be your system admin email or your own
+    msg['To'] = EMAIL_ADDRESS  
     msg['Subject'] = "Script Error Notification"
     msg.set_content(f"An error occurred while running the script:\n\n{error_message}")
     
@@ -67,7 +62,6 @@ def send_error_email(error_message):
     except Exception as e:
         print(f"Failed to send error email: {e}")
 
-
 def send_email(attachment_data, attachment_filename, recipient_email):
     """Sends an email with the processed IF Prep Sheet attached."""
     msg = EmailMessage()
@@ -77,7 +71,6 @@ def send_email(attachment_data, attachment_filename, recipient_email):
     msg.set_content("Attached is the updated IF Prep Sheet.")
 
     try:
-        # Attach file correctly with proper MIME type
         msg.add_attachment(
             attachment_data.encode("utf-8"),
             maintype="text",
@@ -97,7 +90,6 @@ def send_email(attachment_data, attachment_filename, recipient_email):
     except Exception as e:
         print(f"Failed to send email: {e}")
 
-
 def fetch_google_sheet(url):
     """Fetches the Google Sheet CSV data and returns a pandas DataFrame."""
     try:
@@ -114,7 +106,6 @@ def fetch_google_sheet(url):
         print(f"Error parsing CSV data: {e}")
         raise
 
-
 def start_conversion(leads_df, recipient_email):
     """
     Converts the leads sheet to match the Instant Fulfillment template,
@@ -122,32 +113,26 @@ def start_conversion(leads_df, recipient_email):
     
     Returns:
         str  -- a string containing the latest processed date (e.g. "2025-01-01") 
-                if new data was processed
+                if new data was processed, or
         None -- if no new data exists or if an error occurs
     """
     print("Starting conversion...")
 
     try:
-        # Get last processed date
         last_processed_date = get_last_processed_date()
         leads_df["Date"] = pd.to_datetime(leads_df["Date"], errors="coerce")
         
-        # Find all dates after last_processed_date
+        # Filter rows based on the last processed date
         mask = leads_df["Date"] >= pd.to_datetime(last_processed_date)
         filtered_dates = leads_df.loc[mask, "Date"]
 
-        # If there is no new data, return None
         if filtered_dates.empty:
             print("No new data to process.")
             return None
 
-        # Find the earliest date after last_processed_date
         earliest_date = filtered_dates.min()
-        
-        # Filter to include all rows from earliest_date onward
         leads_df = leads_df[leads_df["Date"] >= earliest_date]
 
-        # Define the headers we want to use manually
         REQUIRED_HEADERS = [
             "Order Date", "Supplier / Retailer", "Item Name / Description",
             "Size / Color", "Bundled?", "# Units in Bundle", "# Units Expected",
@@ -158,28 +143,22 @@ def start_conversion(leads_df, recipient_email):
         output_data = []
 
         for _, row in leads_df.iterrows():
-            # Format the date to "YYYY-MM-DD"
             date_value = row.get("Date", "")
-            if pd.isnull(date_value):
-                date_str = ""
-            else:
-                date_str = date_value.strftime("%Y-%m-%d")
+            date_str = "" if pd.isnull(date_value) else date_value.strftime("%Y-%m-%d")
 
-            # Remove $ symbols and handle non-numeric sale prices
             sale_price_str = str(row.get("Sale Price", "0")).replace("$", "").replace(",", "").strip()
             try:
                 sale_price = float(sale_price_str)
                 requested_price = round(sale_price * 1.15, 2)
             except ValueError:
-                requested_price = ""  # If Sale Price is not a valid number, set to empty
+                requested_price = ""
 
-            # Ensure "Prep Notes" is empty if it is null
             prep_notes = row.get("Prep Notes", "")
             if pd.isna(prep_notes):
                 prep_notes = ""
 
             mapped_row = {
-                "Order Date": date_str,  # Use formatted date here
+                "Order Date": date_str,
                 "Supplier / Retailer": "N/A",
                 "Item Name / Description": str(row.get("Name", "")),
                 "Size / Color": str(row.get("Size/Color", "N/A")),
@@ -198,51 +177,56 @@ def start_conversion(leads_df, recipient_email):
             }
             output_data.append(mapped_row)
 
-        # Convert to DataFrame using our required headers
         output_df = pd.DataFrame(output_data)
         output_df = output_df.reindex(columns=REQUIRED_HEADERS, fill_value="")
         output_df = output_df.astype(str)
 
-        # Write the DataFrame to a CSV in memory
         csv_buffer = StringIO()
-        output_df.to_csv(
-            csv_buffer,
-            index=False,
-            header=True,
-            quoting=csv.QUOTE_ALL
-        )
-        
-        # Send email with the CSV attachment
+        output_df.to_csv(csv_buffer, index=False, header=True, quoting=csv.QUOTE_ALL)
         send_email(csv_buffer.getvalue(), "IF_Prep_Sheet.csv", recipient_email)
 
-        # Return the latest date found in the processed data
         latest_date = str(leads_df["Date"].max().date())
         print("Conversion process complete.")
         return latest_date
 
     except Exception as e:
         print(f"Error during conversion: {e}")
-        # Return None to indicate failure or no date
         return None
 
+def get_users_config():
+    """Fetches the user configuration (sheet links and emails) from S3."""
+    s3_client = boto3.client('s3')
+    try:
+        response = s3_client.get_object(Bucket=CONFIG_S3_BUCKET, Key=USERS_CONFIG_KEY)
+        config_data = json.loads(response['Body'].read().decode('utf-8'))
+        return config_data.get("users", [])
+    except Exception as e:
+        print(f"Error fetching users config: {e}")
+        return []
 
 def lambda_handler(event, context):
     """AWS Lambda Entry Point."""
     try:
-        # Process Tevin's sheet
-        leads_df1 = fetch_google_sheet(TEVIN_SHEET)
-        tevin_latest = start_conversion(leads_df1, TEVIN_EMAIL)
+        # 1) Fetch all user records
+        users = get_users_config()
+        if not users:
+            print("No user configurations found.")
+        
+        # 2) Loop over each user record
+        for user in users:
+            sheet_link = user.get("sheet")
+            recipient_email = user.get("email")
 
-        # Process David's sheet
-        leads_df2 = fetch_google_sheet(DAVID_SHEET)
-        david_latest = start_conversion(leads_df2, DAVID_EMAIL)
+            # 3) Skip any record missing sheet or email
+            if not sheet_link or not recipient_email:
+                print(f"Skipping user record due to missing sheet or email: {user}")
+                continue
 
-        # Process Oscar's sheet
-        leads_df3 = fetch_google_sheet(OSCAR_SHEET)
-        oscar_latest = start_conversion(leads_df3, OSCAR_EMAIL)
-
-        # Instead of using the latest date from the sheets,
-        # update the config with the current date (UTC) as the processed date.
+            print(f"Processing sheet for: {recipient_email}")
+            leads_df = fetch_google_sheet(sheet_link)
+            start_conversion(leads_df, recipient_email)
+        
+        # 4) Update the last processed date (we use current date/time for simplicity)
         current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         update_last_processed_date(current_date)
         print(f"Final last processed date updated to: {current_date}")
