@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import pandas as pd
 import requests
 import smtplib
@@ -9,7 +10,8 @@ from dotenv import load_dotenv
 import boto3
 from io import StringIO
 import csv
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +22,19 @@ CONFIG_S3_BUCKET = os.getenv("CONFIG_S3_BUCKET")
 
 # Key for your new user config file in S3
 USERS_CONFIG_KEY = "users.json"
+
+# Define a Tee class to duplicate stdout writes to multiple streams
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 def get_last_processed_date():
     """Retrieve the last processed date from the config file in S3."""
@@ -48,7 +63,6 @@ def send_error_email(error_message):
     """Sends an email notification if the script encounters an error."""
     msg = EmailMessage()
     msg['From'] = EMAIL_ADDRESS
-    # Could be your system admin email or your own
     msg['To'] = EMAIL_ADDRESS  
     msg['Subject'] = "Script Error Notification"
     msg.set_content(f"An error occurred while running the script:\n\n{error_message}")
@@ -90,6 +104,22 @@ def send_email(attachment_data, attachment_filename, recipient_email):
     except Exception as e:
         print(f"Failed to send email: {e}")
 
+def send_notification_email(recipient_email, subject, message):
+    """Sends a notification email to the user."""
+    msg = EmailMessage()
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+    msg.set_content(message)
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print(f"Notification email sent to {recipient_email}.")
+    except Exception as e:
+        print(f"Failed to send notification email to {recipient_email}: {e}")
+
 def fetch_google_sheet(url):
     """Fetches the Google Sheet CSV data and returns a pandas DataFrame."""
     try:
@@ -128,6 +158,11 @@ def start_conversion(leads_df, recipient_email):
 
         if filtered_dates.empty:
             print("No new data to process.")
+            send_notification_email(
+                recipient_email,
+                "No new purchases to process",
+                "There are no new purchases to process."
+            )
             return None
 
         earliest_date = filtered_dates.min()
@@ -206,6 +241,11 @@ def get_users_config():
 
 def lambda_handler(event, context):
     """AWS Lambda Entry Point."""
+    # Set up log capturing by overriding sys.stdout
+    original_stdout = sys.stdout
+    log_buffer = StringIO()
+    sys.stdout = Tee(original_stdout, log_buffer)
+
     try:
         # 1) Fetch all user records
         users = get_users_config()
@@ -226,15 +266,20 @@ def lambda_handler(event, context):
             leads_df = fetch_google_sheet(sheet_link)
             start_conversion(leads_df, recipient_email)
         
-        # 4) Update the last processed date (we use current date/time for simplicity)
-        current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        current_date = datetime.now(ZoneInfo("America/New_York")).strftime('%Y-%m-%d')
+        print(current_date)
         update_last_processed_date(current_date)
         print(f"Final last processed date updated to: {current_date}")
 
         return {"statusCode": 200, "body": "Process completed for all sheets."}
 
     except Exception as e:
-        error_message = f"Error in Lambda function: {str(e)}"
+        # Include the console log in the error email
+        error_message = f"Error in Lambda function: {str(e)}\n\nLogs:\n{log_buffer.getvalue()}"
         print(error_message)
         send_error_email(error_message)
         return {"statusCode": 500, "body": error_message}
+
+    finally:
+        # Restore original stdout
+        sys.stdout = original_stdout
